@@ -1,6 +1,6 @@
 {
   "name": "tiered-workflow",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Risk-tiered Claude Code workflow for every project: tier, grill, plan check, tests first, gated build, graded review, screenshots, stage smoke.",
   "author": {
     "name": "Aman Nabi"

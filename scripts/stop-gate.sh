@@ -48,9 +48,42 @@ compute_turn() { # repo baseline-file
   printf '%s\n%s\n' "$changed" "$gone" | sed '/^$/d' | sort -u
 }
 
+files_under() { # folder -> the turn's code files under it, as quoted absolute paths
+  local f out="" dir="$1"
+  [ -z "$dir" ] || dir="${dir%/}/"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in "$dir"*) out="$out $(printf '%q' "$repo/$f")" ;; esac
+  done <<EOF
+$code_files
+EOF
+  printf '%s' "${out# }"
+}
+
+# Fills every {files} and {files:<prefix>} in a command. Returns 1 when one of them
+# has no files, so the step is skipped rather than run on the whole folder.
+expand_cmd() { # command
+  local rest="$1" out="" prefix list
+  while :; do
+    case "$rest" in *"{files"*) ;; *) break ;; esac
+    out="$out${rest%%"{files"*}"
+    rest="${rest#*"{files"}"
+    case "$rest" in
+      "}"*) prefix=""; rest="${rest#\}}" ;;
+      ":"*"}"*) prefix="${rest#:}"; prefix="${prefix%%\}*}"; rest="${rest#*\}}" ;;
+      *) out="$out{files"; continue ;;
+    esac
+    list="$(files_under "$prefix")"
+    [ -n "$list" ] || return 1
+    out="$out$list"
+  done
+  printf '%s' "$out$rest"
+}
+
 session="$(json_field session_id)"
 trusted_list="$(cat "$(trust_file)" 2>/dev/null)"
 tab=$'\t'
+export TIERED_WORKFLOW_SCRIPTS="$scripts_dir"
 failures=""
 notes=""
 
@@ -85,34 +118,30 @@ Checks were still failing in $repo when Claude stopped without further changes."
 
   turn_files="$(printf '%s\n' "$turn" | awk '$1 != "deleted" { print substr($0, index($0, " ") + 1) }')"
   extensions="$(conf_get "$conf" GATE_EXTENSIONS "ts tsx js jsx mjs cjs")"
-  files=""
+  code_files=""
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     for ext in $extensions; do
-      case "$f" in *."$ext") files="$files $(printf '%q' "$repo/$f")"; break ;; esac
+      case "$f" in *."$ext") code_files="$code_files$f
+"; break ;; esac
     done
   done <<EOF
 $turn_files
 EOF
 
   conf_sha="$(git hash-object -- "$conf")"
+  steps="$(conf_get "$conf" STEPS "LINT TYPECHECK TEST")"
   trusted=0
-  printf '%s\n' "$trusted_list" | grep -q -x -F "$repo$tab$conf_sha" && trusted=1
+  printf '%s\n' "$trusted_list" | grep -q -x -F "$(trust_id "$repo")$tab$conf_sha" && trusted=1
 
   timeout="$(conf_get "$conf" STEP_TIMEOUT 300)"
   case "$timeout" in ''|*[!0-9]*|0) timeout=300 ;; esac
   failed=""
   if [ "$trusted" = 1 ]; then
-    for step in LINT TYPECHECK TEST; do
+    for step in $steps; do
       cmd="$(conf_get "$conf" "${step}_CMD" "")"
       [ -n "$cmd" ] || continue
-      case "$cmd" in
-        *"{files}"*)
-          [ -n "$files" ] || continue
-          # Split rather than substitute, so quoted paths keep their backslashes.
-          cmd="${cmd%%"{files}"*}${files# }${cmd#*"{files}"}"
-          ;;
-      esac
+      cmd="$(expand_cmd "$cmd")" || continue
       output="$(run_step "$repo" "$timeout" "$cmd" </dev/null)"
       code=$?
       [ "$code" -eq 0 ] && continue
@@ -124,7 +153,7 @@ Command: $cmd
 $tail_out"
       break
     done
-  elif [ -n "$(conf_get "$conf" LINT_CMD "")$(conf_get "$conf" TYPECHECK_CMD "")$(conf_get "$conf" TEST_CMD "")" ]; then
+  elif [ -n "$(for step in $steps; do conf_get "$conf" "${step}_CMD" ""; done)" ]; then
     notes="$notes
 Gate commands in $repo are not trusted yet, so lint, typecheck and tests were skipped. Run /tiered-workflow:gate-trust to review and trust them."
   fi

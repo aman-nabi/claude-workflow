@@ -42,12 +42,12 @@ Or inside a session: `/plugin marketplace add aman-nabi/claude-workflow`, then `
 
 1. Copy `templates/workflow-profile.md` to `<repo>/.claude/workflow-profile.md` and fill it in: the protected areas with real paths, the commands, the stage URLs and where docs live.
 2. Copy `templates/workflow-gate.conf` to `<repo>/.claude/workflow-gate.conf` and set the lint, typecheck and test commands. Without this file the Stop gate does nothing in that repo.
-3. Run `/tiered-workflow:gate-trust` in the repo. The gate never runs a repo's commands until you have trusted its config, and asks again whenever the config changes. The comment check needs no trust, because it runs no repo commands.
+3. Run `/tiered-workflow:gate-trust` in the repo. The gate never runs a repo's commands until you have trusted its config, and asks again whenever the config changes. Trust is recorded per git folder, so one trust covers every worktree of the repo; a separate clone needs its own trust. The comment check needs no trust, because it runs no repo commands.
 4. Keep build output and test artifacts in `.gitignore`. The gate treats a new untracked file as a change.
 5. Commit both files.
 6. Paste the block from `templates/claude-md-rules.md` into the global CLAUDE.md of each Claude Code login, or into the project's CLAUDE.md.
 
-For a folder that holds several repos and is not a git repo itself, put a `workflow-gate.conf` with `REPOS=<relative paths>` at the folder's `.claude/`, plus one in each repo.
+For a host folder that holds several repos, put a `workflow-gate.conf` with `REPOS=<relative paths or patterns>` at the folder's `.claude/`, plus one in each repo. A pattern such as `tmp/*/app` reaches every worktree. For a repo with several packages, name your own `STEPS` and pass each package its files with `{files:<folder>}`; see `templates/workflow-gate.conf`.
 
 The gate's switches:
 - **Off everywhere:** set `CLAUDE_WORKFLOW_GATE=off` in the environment.
@@ -64,17 +64,23 @@ The tests build throwaway git repos in a temp folder and check the gate's behavi
 - **Scope:**
   - silent when not configured or nothing changed;
   - the user's own work is never checked;
-  - multi-repo host folders.
+  - multi-repo host folders, and `REPOS` patterns that reach every worktree;
+  - named `STEPS`, and `{files:<folder>}` passing each package only its own files.
 - **Blocking:**
   - a block on failure, with valid JSON;
   - the attempt cap;
-  - trust, and trust again after a config change;
   - the pause marker;
   - timeouts that kill child processes.
+- **Trust:**
+  - trust, and trust again after a config change;
+  - one trust covers every worktree; a separate clone claiming the same origin is not trusted;
+  - `--show` lists every step and records nothing; a config changed after `--show` is refused.
 - **Input handling:**
   - paths with spaces;
   - config quoting and CRLF;
+  - step names are never run as commands;
   - the comment check's flags and its false-alarm cases.
+- **Typecheck helper:** errors only in the changed files, several files, `../` paths, unreadable output, a tsconfig that checks nothing, a command without `--`.
 
 ## Updating
 

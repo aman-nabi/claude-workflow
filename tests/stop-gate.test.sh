@@ -42,10 +42,13 @@ SH
   git -C "$1" add -A
   git -C "$1" commit -q -m init
 }
+trust() { # dir -> trusts the config as it is now
+  bash "$trust_script" "$1" "$(git hash-object -- "$1/.claude/workflow-gate.conf")" >/dev/null
+}
 set_conf() { # dir text -> writes, commits and trusts the config
   printf '%s\n' "$2" > "$1/.claude/workflow-gate.conf"
   git -C "$1" add -A; git -C "$1" commit -q -m conf
-  bash "$trust_script" "$1" >/dev/null
+  trust "$1"
 }
 hook_input() { printf '{"session_id":"%s","cwd":"%s","hook_event_name":"%s","stop_hook_active":%s}' "$1" "$2" "$3" "$4"; }
 start_turn() { # project session [cwd]
@@ -140,7 +143,7 @@ check "with no turn-start record the gate does not guess" '[ -z "$out" ]'
 r="$work/r13"; new_repo "$r"; printf 'TEST_CMD=./check.sh {files}\n' > "$r/.claude/workflow-gate.conf"; git -C "$r" add -A; git -C "$r" commit -q -m conf
 start_turn "$r" s13; printf 'BUG\n' > "$r/app.ts"; run_gate "$r" s13 false
 check "untrusted commands are skipped and the user is told" 'case "$out" in *"systemMessage"*"not trusted"*) valid_json "$out" ;; *) false ;; esac'
-bash "$trust_script" "$r" >/dev/null
+trust "$r"
 start_turn "$r" s13; printf 'BUG again\n' > "$r/app.ts"; run_gate "$r" s13 false
 check "trusted commands run" 'case "$out" in *"\"decision\":\"block\""*) true ;; *) false ;; esac'
 printf 'TEST_CMD=./check.sh {files}\nSTEP_TIMEOUT=60\n' > "$r/.claude/workflow-gate.conf"
@@ -216,6 +219,88 @@ check "JSX comments are checked" 'case "$out" in *"view.tsx:3: comment talks abo
 r="$work/c8"; comment_repo "$r" 'COMMENT_CHECK=0'; start_turn "$r" c8
 printf '// previously we used a fixed window\nexport const d = 4;\n' > "$r/off.ts"; run_gate "$r" c8 false
 check "COMMENT_CHECK=0 turns the comment check off" '[ -z "$out" ]'
+
+# v1.1.0: named steps, {files:<folder>}, REPOS patterns, trust per git folder, the typecheck helper.
+r="$work/m1"; new_repo "$r"; mkdir -p "$r/be" "$r/fe"
+set_conf "$r" "$(printf 'STEPS=BE FE BOTH\nBE_CMD=echo BE {files:be/} >> %s\nFE_CMD=echo FE {files:fe/} >> %s\nBOTH_CMD=echo BOTH {files:be/} AND {files} >> %s' "$work/m1.log" "$work/m1.log" "$work/m1.log")"
+start_turn "$r" m1; printf 'x\n' > "$r/be/a.ts"; run_gate "$r" m1 false
+log="$(cat "$work/m1.log" 2>/dev/null)"
+check "named steps run, and a prefix passes only its own files" 'case "$log" in *"BE $r/be/a.ts"*) case "$log" in *"FE "*) false ;; *) true ;; esac ;; *) false ;; esac'
+check "every placeholder in a command is filled" 'case "$log" in *"BOTH $r/be/a.ts AND $r/be/a.ts"*) true ;; *) false ;; esac'
+
+r="$work/m2"; new_repo "$r"; mkdir -p "$r/be" "$r/bend"
+set_conf "$r" "$(printf 'STEPS=BE\nBE_CMD=echo BE {files:be} >> %s' "$work/m2.log")"
+start_turn "$r" m2; printf 'x\n' > "$r/be/a.ts"; printf 'x\n' > "$r/bend/b.ts"; run_gate "$r" m2 false
+log="$(cat "$work/m2.log" 2>/dev/null)"
+check "a folder prefix does not match a longer folder name" 'case "$log" in *"BE $r/be/a.ts"*) case "$log" in *bend*) false ;; *) true ;; esac ;; *) false ;; esac'
+
+# With the old sed reader this step name made BSD sed write $trap/p (GNU sed could run commands).
+r="$work/m3"; new_repo "$r"; trap_dir="$work/m3-written_CMD[[:space:]]*=[[:space:]]*"; mkdir -p "$trap_dir"
+set_conf "$r" "$(printf 'STEPS=x//;w%s\nTEST_CMD=./check.sh {files}' "$work/m3-written")"
+start_turn "$r" m3; printf 'x\n' > "$r/app.ts"; run_gate "$r" m3 false
+check "a step name is never run as a sed command" '[ ! -e "$trap_dir/p" ]'
+
+p="$work/host2"; mkdir -p "$p/.claude" "$p/tmp/w1" "$p/tmp/w2"; printf 'REPOS=tmp/*/svc\n' > "$p/.claude/workflow-gate.conf"
+new_repo "$p/tmp/w1/svc"; new_repo "$p/tmp/w2/svc"
+set_conf "$p/tmp/w1/svc" 'TEST_CMD=./check.sh {files}'; set_conf "$p/tmp/w2/svc" 'TEST_CMD=./check.sh {files}'
+start_turn "$p" g1; printf 'BUG in w2\n' > "$p/tmp/w2/svc/app.ts"; run_gate "$p" g1 false
+check "REPOS patterns reach every matching worktree" 'case "$out" in *"TEST failed in $p/tmp/w2/svc"*) true ;; *) false ;; esac'
+
+a="$work/o1"; new_repo "$a"; git -C "$a" remote add origin git@example.test:team/product.git
+set_conf "$a" 'TEST_CMD=./check.sh {files}'
+w="$work/o1-worktree"; git -C "$a" worktree add -q "$w" 2>/dev/null
+start_turn "$w" o1; printf 'BUG in the worktree\n' > "$w/app.ts"; run_gate "$w" o1 false
+check "trust covers every worktree of the trusted repo" 'case "$out" in *"\"decision\":\"block\""*) true ;; *) false ;; esac'
+b="$work/o2"; git clone -q "$a" "$b"; git -C "$b" remote set-url origin git@example.test:team/product.git
+start_turn "$b" o2; printf 'BUG in a separate clone\n' > "$b/app.ts"; run_gate "$b" o2 false
+check "a separate clone claiming the same origin is not trusted" 'case "$out" in *"not trusted"*) true ;; *) false ;; esac'
+
+r="$work/t1"; new_repo "$r"
+printf 'STEPS=LINT EXTRA\nLINT_CMD=./check.sh {files}\nEXTRA_CMD=echo extra\n' > "$r/.claude/workflow-gate.conf"; git -C "$r" add -A; git -C "$r" commit -q -m conf
+out="$(bash "$trust_script" --show "$r")"
+check "--show lists every step's command and the folder the trust covers" 'case "$out" in *"LINT_CMD: ./check.sh {files}"*"EXTRA_CMD: echo extra"*) case "$out" in *"Trust covers every worktree of: $r/.git"*) true ;; *) false ;; esac ;; *) false ;; esac'
+check "--show records nothing" '! bash "$trust_script" --list | grep -q -F "$r/.git"'
+old_id="$(git hash-object -- "$r/.claude/workflow-gate.conf")"
+printf 'STEPS=LINT EXTRA\nLINT_CMD=./check.sh {files}\nEXTRA_CMD=echo changed\n' > "$r/.claude/workflow-gate.conf"
+out="$(bash "$trust_script" "$r" "$old_id" 2>&1)"; code=$?
+check "trust is refused when the config changed after --show" '[ "$code" = 1 ] && case "$out" in *"does not match"*) true ;; *) false ;; esac'
+
+r="$work/e1"; new_repo "$r"; set_conf "$r" 'TEST_CMD=test -x "$TIERED_WORKFLOW_SCRIPTS/tsc-changed.sh"'
+start_turn "$r" e1; printf 'x\n' > "$r/app.ts"; run_gate "$r" e1 false
+check "commands can reach the plugin's helper scripts" '[ -z "$out" ]'
+
+# tsc-changed.sh with a stand-in npx that prints tsc-style errors and its file list.
+fake="$work/fakebin"; mkdir -p "$fake"
+cat > "$fake/npx" <<'SH'
+#!/usr/bin/env bash
+listed() { printf '%s\n' "$PWD/node_modules/typescript/lib/lib.d.ts" "$PWD/src/a.ts" "$PWD/src/b.ts"; }
+case "${FAKE_TSC:-}" in
+  errors) printf 'src/a.ts(1,5): error TS2322: Type "x" is not assignable.\n  More detail for a.\n../shared/x.ts(2,1): error TS2304: Cannot find name "z".\nsrc/old.ts(3,1): error TS2304: Cannot find name "y".\n'; listed; exit 2 ;;
+  pretty) printf 'src/a.ts:1:5 - error TS2322: Type "x" is not assignable.\n'; listed; exit 2 ;;
+  nofiles) printf '%s\n' "$PWD/node_modules/typescript/lib/lib.d.ts"; exit 0 ;;
+  broken) echo "npm ERR! could not determine executable to run"; exit 1 ;;
+  *) listed; exit 0 ;;
+esac
+SH
+chmod +x "$fake/npx"
+d="$work/tsc"; mkdir -p "$d/app/src" "$d/shared"; dd="$(cd "$d" && pwd -P)"
+tsc_run() { (cd "$d/app" && PATH="$fake:$PATH" FAKE_TSC="$1" bash "$here/scripts/tsc-changed.sh" -p tsconfig.json -- "${@:2}"); }
+out="$(tsc_run errors "$dd/app/src/a.ts")"; code=$?
+check "typecheck helper fails on errors in the changed files" '[ "$code" = 1 ] && case "$out" in *"src/a.ts(1,5)"*"More detail for a."*) case "$out" in *old.ts*) false ;; *) true ;; esac ;; *) false ;; esac'
+out="$(tsc_run errors "$dd/app/src/b.ts" "$dd/app/src/a.ts")"; code=$?
+check "typecheck helper handles several changed files" '[ "$code" = 1 ] && case "$out" in *"src/a.ts(1,5)"*) true ;; *) false ;; esac'
+out="$(tsc_run errors "$dd/shared/x.ts")"; code=$?
+check "typecheck helper matches errors reported with ../ paths" '[ "$code" = 1 ] && case "$out" in *"../shared/x.ts(2,1)"*) true ;; *) false ;; esac'
+out="$(tsc_run errors "$dd/app/src/b.ts")"; code=$?
+check "typecheck helper ignores errors that are only in other files" '[ "$code" = 0 ]'
+out="$(tsc_run broken "$dd/app/src/a.ts")"; code=$?
+check "typecheck helper fails when tsc cannot run at all" '[ "$code" = 1 ] && case "$out" in *"could not determine"*) true ;; *) false ;; esac'
+out="$(tsc_run pretty "$dd/app/src/b.ts")"; code=$?
+check "typecheck helper fails when it cannot read the tsc output" '[ "$code" = 1 ] && case "$out" in *"could not read"*) true ;; *) false ;; esac'
+out="$(tsc_run nofiles "$dd/app/src/a.ts")"; code=$?
+check "typecheck helper fails when tsc checked no file in the folder" '[ "$code" = 1 ] && case "$out" in *"checked no file"*) true ;; *) false ;; esac'
+out="$(cd "$d/app" && PATH="$fake:$PATH" bash "$here/scripts/tsc-changed.sh" -p tsconfig.json "$dd/app/src/a.ts" 2>&1)"; code=$?
+check "typecheck helper refuses a command without --" '[ "$code" = 2 ]'
 
 printf '\n%s passed, %s failed (shell: %s, %s)\n' "$pass" "$fail" "$shell" "$("$shell" -c 'echo $BASH_VERSION')"
 [ "$fail" = 0 ]

@@ -5,9 +5,17 @@ json_field() { # name -> first string value of that field in the hook input
   printf '%s' "$input" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1
 }
 
+# The key is matched as plain text, never as a pattern: step names come from the
+# config itself, before it is trusted.
 conf_get() { # file key default -> value, with \r removed and one pair of surrounding quotes removed
   local value
-  value="$(sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*//p" "$1" 2>/dev/null | tail -n 1 | tr -d '\r')"
+  value="$(KEY="$2" awk '
+    { line = $0; sub(/^[ \t]+/, "", line)
+      if (substr(line, 1, length(ENVIRON["KEY"])) != ENVIRON["KEY"]) next
+      rest = substr(line, length(ENVIRON["KEY"]) + 1); sub(/^[ \t]+/, "", rest)
+      if (substr(rest, 1, 1) != "=") next
+      rest = substr(rest, 2); sub(/^[ \t]+/, "", rest); value = rest; seen = 1 }
+    END { if (seen) printf "%s", value }' "$1" 2>/dev/null | tr -d '\r')"
   case "$value" in
     \"*\") value="${value#\"}"; value="${value%\"}" ;;
   esac
@@ -23,13 +31,20 @@ trust_file() {
   printf '%s/tiered-workflow/trusted-gates' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 }
 
+# Trust follows the repo's shared git folder, so one trust covers every worktree of
+# it. A separate clone needs its own trust: an origin URL is local config that any
+# folder can claim.
+trust_id() { # repo
+  (cd "$1" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
+}
+
 repo_state_dir() { # session repo
   printf '%s/%s/%s' "$(state_base)" "${1:-no-session}" "$(printf '%s' "$2" | git hash-object --stdin)"
 }
 
 # Prints the repos to check, one per line: the project, the hook's cwd, and any
-# REPOS that the project's config lists. A repo whose own config sets REPOS is a
-# host folder and is never checked itself.
+# REPOS that the project's config lists (patterns such as tmp/*/app allowed). A repo
+# whose own config sets REPOS is a host folder and is never checked itself.
 gate_repos() {
   local dir top rel conf seen=" "
   {
@@ -38,9 +53,10 @@ gate_repos() {
     done
     conf="$project_dir/.claude/workflow-gate.conf"
     if [ -f "$conf" ]; then
-      for rel in $(conf_get "$conf" REPOS ""); do
-        git -C "$project_dir/$rel" rev-parse --show-toplevel 2>/dev/null
-      done
+      # Unquoted on purpose: each pattern expands from the project folder.
+      (cd "$project_dir" && for rel in $(conf_get "$conf" REPOS ""); do
+        [ -d "$rel" ] && git -C "$rel" rev-parse --show-toplevel 2>/dev/null
+      done)
     fi
   } | while IFS= read -r top; do
     case "$seen" in *" $top "*) continue ;; esac

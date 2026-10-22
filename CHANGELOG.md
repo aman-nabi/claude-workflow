@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.1.0 (2026-10-22)
+
+Set-up for real multi-package, multi-worktree projects.
+
+- **`STEPS`** names the gate's steps and their order, each with its own `<NAME>_CMD`.
+- **`{files:<folder>}`** passes only the changed files inside that folder, and every placeholder in a command is filled. A command whose placeholder has no files is skipped.
+- **`scripts/tsc-changed.sh`**, reachable as `$TIERED_WORKFLOW_SCRIPTS/tsc-changed.sh`, fails only on type errors in the changed files, so errors that already exist on main do not block. It fails when tsc cannot run, when its output cannot be read, and when tsc checked no file in the folder (a solution-style tsconfig).
+  - **Limit:** an error the change causes in a file it did not touch, such as a caller broken by a changed signature, does not block here. The full typecheck at review catches it. An error already in a touched file does block; the block message tells Claude to report it, not change the user's work.
+- **`REPOS`** accepts patterns such as `tmp/*/app`, read from the host folder.
+- **Trust is recorded per git folder**, so one trust covers every worktree of a repo. A separate clone needs its own trust, because an origin URL is local config that any folder can claim.
+- **`gate-trust.sh --show`** prints every command named in `STEPS` and the folder the trust covers, and changes nothing. Trusting takes the config id that `--show` printed, and is refused if the config changed in between.
+- **Config keys are matched as plain text.** Step names come from the config before it is trusted; a crafted name could run as a sed command before.
+- **Upgrading from 1.0.0:** trust records from 1.0.0 are keyed by path, so trust each repo again.
+- **Tests:** 54 cases.
+
 ## 1.0.0 (2026-10-22)
 
 First version.
