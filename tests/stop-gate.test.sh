@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests for scripts/turn-start.sh, scripts/stop-gate.sh, scripts/comment-check.sh and
-# scripts/gate-trust.sh. Run: bash tests/stop-gate.test.sh [path-to-bash]
+# Tests for scripts/turn-start.sh, stop-gate.sh, comment-check.sh, gate-trust.sh,
+# test-lock.sh and agent-worktree.sh. Run: bash tests/stop-gate.test.sh [path-to-bash]
 # Each case builds throwaway git repos in a temp folder, feeds the hooks their JSON
 # input, and checks the gate's stdout.
 set -u
@@ -186,7 +186,7 @@ printf '// previously we parsed by hand\nexport const u = 1;\nexport const v = 2
 run_gate "$r" c2 false
 check "the user's own comment in a file Claude edits is not flagged" '[ -z "$out" ]'
 
-r="$work/c3"; comment_repo "$r" 'TEST_CMD='; start_turn "$r" c3
+r="$work/c3"; comment_repo "$r" 'COMMENT_MAX_LINES=0'; start_turn "$r" c3
 printf 'export function f() {\n  // TODO handle the empty case\n  // TODO(ID-37) handle the linked account\n  // FIXME see https://example.test/issue/9\n  return 1;\n}\n' > "$r/todo.ts"
 run_gate "$r" c3 false
 check "TODO needs a ticket; ticket IDs and links pass" 'case "$out" in *"todo.ts:2: TODO without a ticket"*) case "$out" in *"todo.ts:3:"*|*"todo.ts:4:"*) false ;; *) true ;; esac ;; *) false ;; esac'
@@ -194,9 +194,9 @@ check "TODO needs a ticket; ticket IDs and links pass" 'case "$out" in *"todo.ts
 r="$work/c4"; comment_repo "$r" 'TEST_CMD='; start_turn "$r" c4
 { printf '/**\n'; for i in 1 2 3 4 5 6 7 8 9; do printf ' * line %s\n' "$i"; done; printf ' */\nexport const c = 3;\n// ==========\n'; } > "$r/block.ts"
 run_gate "$r" c4 false
-check "long blocks and banners are flagged" 'case "$out" in *"block.ts:9: comment block longer than 8 lines"*"block.ts:13: banner or divider"*) true ;; *) false ;; esac'
+check "long blocks and banners are flagged" 'case "$out" in *"block.ts:3: comment block longer than 2 lines"*"block.ts:13: banner or divider"*) true ;; *) false ;; esac'
 
-r="$work/c5"; comment_repo "$r" 'COMMENT_MAX_LINES=0'; start_turn "$r" c5
+r="$work/c5"; comment_repo "$r" "$(printf 'COMMENT_MAX_LINES=0\nCOMMENT_MAX_PER_FILE=0')"; start_turn "$r" c5
 { printf '/**\n'; for i in 1 2 3 4 5 6 7 8 9; do printf ' * line %s\n' "$i"; done; printf ' */\nexport const c = 3;\n'; } > "$r/block.ts"
 run_gate "$r" c5 false
 check "COMMENT_MAX_LINES=0 allows long blocks" '[ -z "$out" ]'
@@ -208,7 +208,7 @@ run_gate "$r" c6 false
 check "why-comments and #private fields pass" 'case "$out" in *"clean.ts:"*) false ;; *) true ;; esac'
 check "hash comments are checked in Python, the shebang is not" 'case "$out" in *"tool.py:2: comment talks about history"*) true ;; *) false ;; esac'
 
-r="$work/c7"; comment_repo "$r" 'COMMENT_BANNERS=0'; start_turn "$r" c7
+r="$work/c7"; comment_repo "$r" "$(printf 'COMMENT_BANNERS=0\nCOMMENT_MAX_LINES=0\nCOMMENT_MAX_PER_FILE=0')"; start_turn "$r" c7
 printf '%s\n' '// ---------------------------------- fixtures' '// A seat holder no longer assigned gets the one 404.' '// Rebuild when the API changed or the UI updated.' '// Restore the previously focused element (WCAG 2.4.3).' '// Pinned to Stripe API version 2024-06-20.' '// Phone mask XXX-XXX-XXXX.' '// Walk fixes 22 Oct 2026: the label is kept.' '// Kept for the audit trail since 3 Mar 2025. comment-check: allow' 'export const e = 5;' > "$r/domain.ts"
 printf 'export const View = () => (\n  <div>\n    {/* Updated as requested */}\n  </div>\n);\n' > "$r/view.tsx"
 run_gate "$r" c7 false
@@ -219,6 +219,87 @@ check "JSX comments are checked" 'case "$out" in *"view.tsx:3: comment talks abo
 r="$work/c8"; comment_repo "$r" 'COMMENT_CHECK=0'; start_turn "$r" c8
 printf '// previously we used a fixed window\nexport const d = 4;\n' > "$r/off.ts"; run_gate "$r" c8 false
 check "COMMENT_CHECK=0 turns the comment check off" '[ -z "$out" ]'
+
+# v1.2.0: comments are rare and short by default.
+r="$work/c9"; comment_repo "$r" 'TEST_CMD='; start_turn "$r" c9
+printf '%s\n' '// Memberfied pairs by invoice first,' '// so the same order is used here (F2 D2.9).' 'export const p = 1;' '// One' '// two' '// three' 'export const q = 2;' > "$r/short.ts"
+run_gate "$r" c9 false
+check "a two-line why passes and a third line is flagged" 'case "$out" in *"short.ts:6: comment block longer than 2 lines"*) case "$out" in *"short.ts:2:"*|*"short.ts:5:"*) false ;; *) true ;; esac ;; *) false ;; esac'
+
+r="$work/c10"; comment_repo "$r" 'TEST_CMD='; start_turn "$r" c10
+{ for i in 1 2 3 4; do printf '// Rule %s from the provider contract,\n// see ID-%s.\nexport const v%s = %s;\n' "$i" "$i" "$i" "$i"; done; } > "$r/many.ts"
+run_gate "$r" c10 false
+check "more than 6 new comment lines in one file are flagged once" 'case "$out" in *"many.ts:10: 7 comment lines added in this file"*) case "$out" in *"many.ts:11: 8 comment"*) false ;; *) true ;; esac ;; *) false ;; esac'
+
+r="$work/c11"; comment_repo "$r" 'COMMENT_MAX_PER_FILE=0'; start_turn "$r" c11
+{ for i in 1 2 3 4; do printf '// Rule %s from the provider contract,\n// see ID-%s.\nexport const v%s = %s;\n' "$i" "$i" "$i" "$i"; done; } > "$r/many.ts"
+run_gate "$r" c11 false
+check "COMMENT_MAX_PER_FILE=0 allows any number of short comments" '[ -z "$out" ]'
+
+# v1.2.0: locked acceptance tests (scripts/test-lock.sh, a PreToolUse hook).
+lock="$here/scripts/test-lock.sh"
+pre_input() { printf '{"session_id":"l","cwd":"%s","hook_event_name":"PreToolUse","tool_name":"%s","tool_input":{"%s":"%s","old_string":"a"}}' "$1" "$2" "$3" "$4"; }
+run_lock() { out="$(pre_input "$@" | "$shell" "$lock")"; code=$?; }
+r="$work/l1"; new_repo "$r"; mkdir -p "$r/tests"; printf 'x\n' > "$r/tests/a.test.ts"
+printf 'tests/a.test.ts\n' > "$(git -C "$r" rev-parse --absolute-git-dir)/tiered-workflow-locked-tests"
+run_lock "$r" Edit file_path "$r/tests/a.test.ts"
+check "an edit to a locked test is refused with valid JSON" '[ "$code" = 0 ] && case "$out" in *"\"permissionDecision\":\"deny\""*"tests/a.test.ts"*) valid_json "$out" ;; *) false ;; esac'
+run_lock "$r" Edit file_path "$r/app.ts"
+check "an edit to a file that is not locked is allowed" '[ "$code" = 0 ] && [ -z "$out" ]'
+run_lock "$r" Write file_path "$r/tests/new/b.test.ts"
+check "a new file in a new folder is allowed" '[ "$code" = 0 ] && [ -z "$out" ]'
+run_lock "$r" NotebookEdit notebook_path "$r/tests/a.test.ts"
+check "a notebook edit to a locked path is refused" 'case "$out" in *"\"permissionDecision\":\"deny\""*) true ;; *) false ;; esac'
+run_lock "$work" Edit file_path "$work/outside.ts"
+check "a file outside any repo is allowed" '[ "$code" = 0 ] && [ -z "$out" ]'
+set_conf "$r" 'TEST_CMD='; start_turn "$r" l1
+touch "$(git -C "$r" rev-parse --absolute-git-dir)/tiered-workflow-tests-unlocked"
+run_lock "$r" Edit file_path "$r/tests/a.test.ts"
+check "the user's unlock allows the edit" '[ "$code" = 0 ] && [ -z "$out" ]'
+printf 'y\n' > "$r/tests/a.test.ts"; run_gate "$r" l1 false
+check "the gate ends the unlock and tells the user" 'case "$out" in *"systemMessage"*"Locked tests were unlocked for this turn"*"tests/a.test.ts"*) [ ! -f "$(git -C "$r" rev-parse --absolute-git-dir)/tiered-workflow-tests-unlocked" ] ;; *) false ;; esac'
+run_lock "$r" Edit file_path "$r/tests/a.test.ts"
+check "the lock holds again after the unlocked turn" 'case "$out" in *"\"permissionDecision\":\"deny\""*) true ;; *) false ;; esac'
+run_lock "$r" Write file_path "$r/tests/a.test.ts"
+check "a Write over a locked test is refused" 'case "$out" in *"\"permissionDecision\":\"deny\""*) true ;; *) false ;; esac'
+run_lock "$r" Write file_path "$(git -C "$r" rev-parse --absolute-git-dir)/tiered-workflow-tests-unlocked"
+check "Claude cannot write the unlock file" 'case "$out" in *"\"permissionDecision\":\"deny\""*"Only the user"*) valid_json "$out" ;; *) false ;; esac'
+r="$work/l2"; new_repo "$r"; printf 'x\n' > "$r/b.test.ts"
+printf 'b.test.ts\r\n' > "$(git -C "$r" rev-parse --absolute-git-dir)/tiered-workflow-locked-tests"
+run_lock "$r" Edit file_path "$r/b.test.ts"
+check "a lock file with CRLF endings still locks" 'case "$out" in *"\"permissionDecision\":\"deny\""*) true ;; *) false ;; esac'
+touch "$(git -C "$r" rev-parse --absolute-git-dir)/tiered-workflow-tests-unlocked"
+run_gate "$r" l2 false
+check "the unlock ends in a repo with no gate config" 'case "$out" in *"Locked tests were unlocked"*"b.test.ts"*) [ ! -f "$(git -C "$r" rev-parse --absolute-git-dir)/tiered-workflow-tests-unlocked" ] ;; *) false ;; esac'
+touch "$(git -C "$r" rev-parse --absolute-git-dir)/tiered-workflow-tests-unlocked"
+out="$(hook_input l2 "$r" Stop false | CLAUDE_PROJECT_DIR="$r" CLAUDE_WORKFLOW_GATE=off "$shell" "$gate")"
+check "the unlock ends with the gate off" 'case "$out" in *"Locked tests were unlocked"*) valid_json "$out" && [ ! -f "$(git -C "$r" rev-parse --absolute-git-dir)/tiered-workflow-tests-unlocked" ] ;; *) false ;; esac'
+r="$work/l3"; new_repo "$r"; set_conf "$r" 'TEST_CMD=./check.sh {files}'; start_turn "$r" l3
+touch "$(git -C "$r" rev-parse --absolute-git-dir)/tiered-workflow-tests-unlocked"
+printf 'BUG\n' > "$r/app.ts"; run_gate "$r" l3 false
+check "a block still tells the user the unlock ended" 'case "$out" in *"\"decision\":\"block\""*"\"systemMessage\""*"Locked: none"*) valid_json "$out" ;; *) false ;; esac'
+check "an unlock with no lock file prints no shell error" 'case "$out" in *"No such file"*) false ;; *) true ;; esac'
+
+# v1.2.0: agent worktrees for parallel work (scripts/agent-worktree.sh).
+aw="$here/scripts/agent-worktree.sh"
+r="$work/w1/repo"; mkdir -p "$work/w1"; new_repo "$r"
+out="$("$shell" "$aw" create "$r" tests)"; code=$?
+wt="$work/w1/repo.agent-tests"
+check "create makes a detached worktree beside the repo" '[ "$code" = 0 ] && [ -d "$wt" ] && [ "$(git -C "$wt" rev-parse HEAD)" = "$(git -C "$r" rev-parse HEAD)" ] && case "$out" in *"$wt"*) true ;; *) false ;; esac'
+printf 'changed\n' > "$wt/app.ts"; mkdir -p "$wt/tests"; printf 'new test\n' > "$wt/tests/n.test.ts"
+out="$("$shell" "$aw" collect "$r" tests)"; code=$?
+check "collect copies changed and new files into the repo and removes the worktree" '[ "$code" = 0 ] && [ "$(cat "$r/app.ts")" = changed ] && [ "$(cat "$r/tests/n.test.ts")" = "new test" ] && [ ! -d "$wt" ] && case "$out" in *"tests/n.test.ts"*) true ;; *) false ;; esac'
+check "collect leaves the changes uncommitted" '[ "$(git -C "$r" rev-list --count HEAD)" = 1 ]'
+"$shell" "$aw" create "$r" build >/dev/null; wt="$work/w1/repo.agent-build"
+printf 'theirs\n' > "$wt/app.ts"; printf 'ours\n' > "$r/app.ts"
+out="$("$shell" "$aw" collect "$r" build 2>&1)"; code=$?
+check "collect refuses a clash and keeps the worktree" '[ "$code" = 1 ] && [ -d "$wt" ] && [ "$(cat "$r/app.ts")" = ours ] && case "$out" in *"does not apply"*) true ;; *) false ;; esac'
+out="$("$shell" "$aw" create "$r" "../x" 2>&1)"; code=$?
+check "create refuses a name that is not letters, digits and dashes" '[ "$code" = 2 ]'
+r="$work/w2/repo"; mkdir -p "$work/w2"; new_repo "$r"; "$shell" "$aw" create "$r" c >/dev/null; wt="$work/w2/repo.agent-c"
+printf 'committed\n' > "$wt/app.ts"; git -C "$wt" commit -q -am "agent commit"; printf '\000\001\002' > "$wt/blob.bin"
+out="$("$shell" "$aw" collect "$r" c)"; code=$?
+check "collect keeps a change the agent committed, and a binary file" '[ "$code" = 0 ] && [ "$(cat "$r/app.ts")" = committed ] && cmp -s "$r/blob.bin" <(printf "\000\001\002") && [ "$(git -C "$r" rev-list --count HEAD)" = 1 ]'
 
 # v1.1.0: named steps, {files:<folder>}, REPOS patterns, trust per git folder, the typecheck helper.
 r="$work/m1"; new_repo "$r"; mkdir -p "$r/be" "$r/fe"

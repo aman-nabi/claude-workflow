@@ -33,7 +33,21 @@ A change touching any of these is high tier. Name real paths so the tier can be 
 ## Walkthrough and screenshots
 
 - Headed walkthrough: `<command>`
+- Walkthrough helpers the walkthrough writer reuses: `<files>`
 - Screenshots saved to: `<folder>`
+
+## Agents: model and effort
+
+Effort follows how settled the work is, never how big it looks. Once the plan is locked, the copying jobs need no deep reasoning.
+
+| Role | Model | Effort |
+|---|---|---|
+| Plan check (contrarian) | `<model>` | high |
+| Test writer | `<model>` | medium |
+| Builder | `<model>` | medium, high for sign-in or money code |
+| Docs writer | `<model>` | medium |
+| Walkthrough writer | `<model>` | medium |
+| Reviewer | `<model>` | high |
 
 ## Stage
 

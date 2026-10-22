@@ -4,7 +4,7 @@ A Claude Code plugin that runs one workflow in every project. Small fixes stay f
 
 The plugin is named `tiered-workflow` because Claude Code reserves plugin names that start with `claude-`. This repo is `claude-workflow`.
 
-The workflow itself is in [docs/workflow-v1.0.0.md](docs/workflow-v1.0.0.md). The change procedure it supports (draft, not yet approved) is in [docs/change-procedure-v1.0.0.md](docs/change-procedure-v1.0.0.md).
+The workflow itself is in [docs/workflow-v1.1.0.md](docs/workflow-v1.1.0.md). The change procedure it supports (draft, not yet approved) is in [docs/change-procedure-v1.0.0.md](docs/change-procedure-v1.0.0.md).
 
 ## What's inside
 
@@ -12,20 +12,23 @@ The workflow itself is in [docs/workflow-v1.0.0.md](docs/workflow-v1.0.0.md). Th
 |---|---|---|
 | Skill | `/tiered-workflow:tier` | Classifies a change as small, normal or high from the project's protected areas |
 | Skill | `/tiered-workflow:fix` | The small-tier flow |
-| Skill | `/tiered-workflow:feature` | The normal and high flow |
+| Skill | `/tiered-workflow:feature` | The normal and high flow, in four stages: agree, build in parallel, check once, close out |
 | Skill | `/tiered-workflow:grill-me`, `grilling` | Questions in rounds, each with a recommended answer (Matt Pocock) |
 | Skill | `/tiered-workflow:plan-check` | One graded contrarian round on the plan |
-| Skill | `/tiered-workflow:tests-first` | A separate agent writes acceptance tests from the plan, then they are shown failing |
+| Skill | `/tiered-workflow:tests-first` | A separate agent writes acceptance tests from the plan's lists, in its own worktree; they are shown failing on the old code, then locked |
 | Skill | `/tiered-workflow:tdd` | The red, green loop for building in vertical slices (Matt Pocock) |
-| Skill | `/tiered-workflow:review` | Two fresh read-only reviewers (Standards, Spec), graded, one round |
+| Skill | `/tiered-workflow:review` | One fresh read-only reviewer per repo covering Standards and Spec, graded, one round, with a follow-up list |
 | Skill | `/tiered-workflow:handoff` | A short hand-off note for starting a fresh session (Matt Pocock) |
 | Agent | `contrarian` | Read-only plan critic (aaddrick/contrarian) |
 | Agent | `test-writer` | Writes tests from the request and plan, never from the code |
-| Agent | `code-reviewer` | Read-only reviewer for one axis |
+| Agent | `code-reviewer` | Read-only reviewer for one axis or both |
 | Skill | `/tiered-workflow:gate-trust` | You run it once per repo to let the Stop gate run that repo's commands |
 | Hook | Turn start (UserPromptSubmit) | Records each gated repo at your prompt, so the gate checks only what changed during the turn |
 | Hook | Stop gate | When Claude ends a turn, checks the files changed since your prompt: lint, typecheck, related tests and the comment check. A failure keeps Claude working, up to 3 times per prompt |
-| Script | `scripts/comment-check.sh` | Flags the added comments that users complain about: history, dated change notes, TODOs without a ticket, dividers, long blocks |
+| Hook | Test lock (PreToolUse) | Refuses edits to the acceptance tests listed as locked; only you lift the lock, for one turn |
+| Script | `scripts/comment-check.sh` | No comments by default: flags history, dated change notes, TODOs without a ticket, dividers, blocks over 2 lines, and more than 6 new comment lines in a file |
+| Script | `scripts/agent-worktree.sh` | Gives each parallel agent its own worktree and collects its changes back, uncommitted |
+| Template | `templates/plan-template.md` | The plan: per fix, the tier, what the user should see, what happens behind the scenes, the names, the files touched, stage times |
 
 ## Install
 
@@ -79,7 +82,9 @@ The tests build throwaway git repos in a temp folder and check the gate's behavi
   - paths with spaces;
   - config quoting and CRLF;
   - step names are never run as commands;
-  - the comment check's flags and its false-alarm cases.
+  - the comment check's flags and its false-alarm cases, the 2-line and per-file limits.
+- **Test lock:** a locked test is refused with valid JSON; other files, new files and files outside a repo are allowed; the user's unlock lasts one turn and the gate says so.
+- **Agent worktrees:** create from HEAD, collect changed and new files uncommitted, refuse a clash and keep the worktree, refuse a bad name.
 - **Typecheck helper:** errors only in the changed files, several files, `../` paths, unreadable output, a tsconfig that checks nothing, a command without `--`.
 
 ## Updating

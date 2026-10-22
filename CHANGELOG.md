@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.2.0 (2026-10-22)
+
+A faster flow: the careful steps stay, each done once, with tight briefs and work in parallel. Built after a batch of six fixes took 6.5 hours, about 30 minutes of it coding. Reasons and sources are in `docs/workflow-v1.1.0.md`.
+
+- **The feature flow runs in four stages.**
+  - **A, agree:** a tier per fix, one grill round for the whole batch, and a plan written once and locked. The user reads the "user should see" and "behind the scenes" lists. The plan check is high tier only, and skipped when every decision is already settled.
+  - **B, build in parallel:** the test writer, one builder per repo, the docs writer and the walkthrough writer start at the same time, each in its own worktree.
+  - **C, check once:** tests red on the old code, then green on the new, the break check, one review per repo, the full suite once, and a walkthrough table with evidence per line.
+  - **D, close out:** the hand-off, then five minutes on what cost time; a mistake seen twice becomes a hook or a check.
+- **`templates/plan-template.md`:** per fix, the tier, the "user should see" and "behind the scenes" lists, the names both sides build to, the exact files touched, the docs, stage times and the follow-up list.
+- **`scripts/agent-worktree.sh`:** `create` gives each parallel agent a detached worktree beside the repo; `collect` copies its changes in, uncommitted, and refuses a clash.
+- **`scripts/test-lock.sh`,** a PreToolUse hook: it refuses edits to the tests listed in `<git-dir>/tiered-workflow-locked-tests`, and to the lock and unlock files themselves. Only the user lifts the lock, for one turn. The Stop gate ends the unlock in every repo the turn reaches, gated or not, even with the gate off, and says so, also when it blocks. Edits made through the shell are not seen by the hook.
+- **Collecting a worktree** diffs from the commit it started at, so a commit an agent made in it is not lost.
+- **Comments:** no comments by default. The comment check now flags a block longer than 2 lines (was 8) and a file that gains more than 6 comment lines in one turn (`COMMENT_MAX_PER_FILE`).
+- **Review:** one reviewer per repo covers Standards and Spec; findings that do not block go to the plan's follow-up list.
+- **Test writer:** works from the plan's lists and names only, in its own worktree, one test per list line.
+- **Profile:** a model and effort table per role.
+- **Feature flow, after review:** when a test writer runs, the main session builds in a worktree too; every worktree is collected before the one review, so docs and the walkthrough script are reviewed with the code.
+- **Upgrading from 1.1.0:** a repo that relied on 8-line comment blocks sets `COMMENT_MAX_LINES` in its gate config. The new hook needs no trust, because it runs no repo commands.
+- **Tests:** 78 cases. Independent review: one round, both axes. Five should-fix findings fixed, each with a test shown red by a deliberate break. One finding was not taken: normal tier keeps the test with the fix, as the owner decided.
+
 ## 1.1.0 (2026-10-22)
 
 Set-up for real multi-package, multi-worktree projects.

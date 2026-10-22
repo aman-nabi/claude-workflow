@@ -1,13 +1,14 @@
 ---
 name: review
-description: Review a change on two axes, Standards and Spec, with fresh read-only reviewers that never saw the work, for one graded round. Use after implementation in every tier, or when the user asks to review a branch, a PR or work in progress.
+description: Review a change on two axes, Standards and Spec, with one fresh read-only reviewer per repo that never saw the work, for one graded round. Use after implementation in every tier, or when the user asks to review a branch, a PR or work in progress.
 ---
 
 Adapted from Matt Pocock's `code-review` skill (MIT, see THIRD_PARTY_NOTICES.md). The changes:
 - graded findings and a single round;
 - no issue-tracker set-up;
-- reviewers are read-only agents that read the diff from a file;
-- a hollow-test check on the Spec axis.
+- one read-only reviewer per repo covers both axes, reading the diff from a file;
+- a hollow-test check on the Spec axis;
+- findings that do not block go to a follow-up list.
 
 ## 1. Pin the change
 
@@ -39,27 +40,23 @@ Smell baseline (Fowler, _Refactoring_, ch. 3), each as *what it is* → *how to 
 - **Middle Man**: a function that mostly delegates → call the real target.
 - **Refused Bequest**: an implementer that ignores most of what it inherits → use composition.
 
-## 3. Start two reviewers
+## 3. Start one reviewer per repo
 
-Start two `tiered-workflow:code-reviewer` agents in the background. If your setup allows only one agent launch per message, launch them back to back. Wait for both.
+Start one `tiered-workflow:code-reviewer` agent per repo in the change, all in one message, in the background. Save one diff file per repo. Wait for all of them.
 
-**Standards reviewer**, give it:
-- the diff file path and the commit list;
-- the standards files;
-- the smell baseline pasted in full;
-- the axis name "Standards";
-- this extra brief: "Check every comment the diff adds:
-  - Does it explain a why the code cannot show (a business rule, an outside constraint, a ticket or decision reference, a non-obvious workaround)?
-  - Does it describe the code as it is now?
-  - Is it short, and free of history, session talk, notes to the user and copied plan text?
+Give each reviewer:
+- its repo's diff file path and commit list;
+- the axis name "Both";
+- the spec (the plan's path, or the text);
+- the standards files and the smell baseline pasted in full;
+- this extra brief: "Standards: check every comment the diff adds. The rule is no comments by default.
+  - Keep one only when it gives a why the code cannot show (a business rule, an outside constraint, a ticket or decision reference, a non-obvious workaround), in one or two lines, describing the code as it is now.
+  - Would it be missed if deleted? If not, report it.
+  - Report history, session talk, notes to the user and copied plan text.
 
-  Report each comment that fails, as nice-to-have unless it is wrong about the code, in which case it is should-fix."
+  A comment finding is nice-to-have unless it is wrong about the code, in which case it is should-fix.
 
-**Spec reviewer**, give it:
-- the diff file path and the commit list;
-- the spec (path or text);
-- the axis name "Spec";
-- this extra brief: "Also check the tests in the diff:
+  Spec: check the change against the plan's lists, then the tests in the diff:
   - Do they test behaviour through public interfaces?
   - Do they mock the project's own code?
   - Do they recompute expected values the way the code does?
@@ -68,9 +65,9 @@ Start two `tiered-workflow:code-reviewer` agents in the background. If your setu
 
 ## 4. Act on the findings, one round
 
-- Present both reports under `## Standards` and `## Spec`, without merging or reranking them.
+- Present each repo's report under `## <repo>`, with its Standards and Spec findings as the reviewer gave them.
 - Fix every **critical** and **should-fix** finding that you can confirm. For one you believe is wrong, say why instead of fixing it.
-- List **nice-to-have** findings for the user; don't act on them unless trivial.
+- Put **nice-to-have** findings, and any new request they raise, on the plan's follow-up list. Act on one now only when it is trivial.
 - Do not run a second review round. If a critical fix changed the design, tell the user and let them decide on another round.
 
 End with one line: the number of findings per axis and grade, the worst finding on each axis, and what you fixed.

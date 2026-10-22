@@ -1,26 +1,35 @@
 #!/usr/bin/env bash
-# tiered-workflow Stop gate (docs/workflow-v1.0.0.md, section 2, step 8). Checks the
+# tiered-workflow Stop gate (docs/workflow-v1.1.0.md, section 2). Checks the
 # files changed during the turn: the repo's lint, typecheck and related tests once
 # the user trusts its config, then the comment check. A failure blocks the stop, so
 # "done" means the checks passed. Every config key is described in
 # templates/workflow-gate.conf; the config is read, never sourced.
 set -u
-[ "${CLAUDE_WORKFLOW_GATE:-on}" = "off" ] && exit 0
 
 input="$(cat)"
 project_dir="${CLAUDE_PROJECT_DIR:-$PWD}"
 scripts_dir="$(cd "$(dirname "$0")" && pwd)"
 . "$scripts_dir/lib.sh"
 
-json_escape() {
-  local s="$1"
-  s="${s//\\/\\\\}"
-  s="${s//\"/\\\"}"
-  s="${s//$'\n'/\\n}"
-  s="${s//$'\r'/}"
-  s="${s//$'\t'/  }"
-  printf '%s' "$s" | LC_ALL=C tr -d '\000-\010\013\014\016-\037'
-}
+# The test lock applies in every repo, gated or not, so its one-turn unlock ends here
+# even when the gate itself is off.
+unlock_notes=""
+while IFS= read -r repo; do
+  [ -n "$repo" ] || continue
+  git_dir="$(git -C "$repo" rev-parse --absolute-git-dir 2>/dev/null)" || continue
+  [ -f "$git_dir/$TESTS_UNLOCKED_FILE" ] || continue
+  rm -f "$git_dir/$TESTS_UNLOCKED_FILE"
+  locked="$(tr '\n' ' ' < "$git_dir/$LOCKED_TESTS_FILE" 2>/dev/null)"
+  unlock_notes="$unlock_notes
+Locked tests were unlocked for this turn in $repo; the lock holds again from the next turn. Locked: ${locked:-none}"
+done <<EOF
+$(candidate_repos)
+EOF
+
+if [ "${CLAUDE_WORKFLOW_GATE:-on}" = "off" ]; then
+  [ -n "$unlock_notes" ] && printf '{"systemMessage":"%s"}\n' "$(json_escape "tiered-workflow:${unlock_notes}")"
+  exit 0
+fi
 
 # Run a command in its own process group; on timeout kill the whole group, so a
 # child such as a test runner cannot hold the output pipe open.
@@ -85,7 +94,7 @@ trusted_list="$(cat "$(trust_file)" 2>/dev/null)"
 tab=$'\t'
 export TIERED_WORKFLOW_SCRIPTS="$scripts_dir"
 failures=""
-notes=""
+notes="$unlock_notes"
 
 while IFS= read -r repo; do
   [ -n "$repo" ] || continue
@@ -163,9 +172,9 @@ Gate commands in $repo are not trusted yet, so lint, typecheck and tests were sk
     while IFS= read -r f; do [ -n "$f" ] && rel_files+=("$f"); done <<EOF
 $turn_files
 EOF
-    found="$(bash "$scripts_dir/comment-check.sh" "$repo" "$(conf_get "$conf" COMMENT_MAX_LINES 8)" "$(conf_get "$conf" COMMENT_BANNERS 1)" "$state/base" ${rel_files[@]+"${rel_files[@]}"} </dev/null)"
+    found="$(bash "$scripts_dir/comment-check.sh" "$repo" "$(conf_get "$conf" COMMENT_MAX_LINES 2)" "$(conf_get "$conf" COMMENT_BANNERS 1)" "$(conf_get "$conf" COMMENT_MAX_PER_FILE 6)" "$state/base" ${rel_files[@]+"${rel_files[@]}"} </dev/null)"
     [ -n "$found" ] && failed="COMMENTS failed in $repo: comments added this turn break the comment rules.
-Keep a comment only for a why the code cannot show. Describe the code as it is now. History goes in the commit message. Add 'comment-check: allow' to a comment only when it truly must stay.
+No comments by default. Keep one only for a why the code cannot show, in one or two lines, describing the code as it is now. History goes in the commit message. Add 'comment-check: allow' to a comment only when it truly must stay.
 $found"
   fi
 
@@ -198,7 +207,11 @@ EOF
 if [ -n "$failures" ]; then
   reason="tiered-workflow gate: the checks failed, so the work is not done yet. Fix the cause, not the test expectations, then finish.${failures}"
   reason="${reason:0:8000}"
-  printf '{"decision":"block","reason":"%s"}\n' "$(json_escape "$reason")"
+  if [ -n "$notes" ]; then
+    printf '{"decision":"block","reason":"%s","systemMessage":"%s"}\n' "$(json_escape "$reason")" "$(json_escape "tiered-workflow gate:${notes}")"
+  else
+    printf '{"decision":"block","reason":"%s"}\n' "$(json_escape "$reason")"
+  fi
   exit 0
 fi
 if [ -n "$notes" ]; then

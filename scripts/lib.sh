@@ -1,8 +1,21 @@
-# Shared by turn-start.sh and stop-gate.sh. Sourced, never run on its own.
-# Callers set: input (the hook's JSON on stdin) and project_dir.
+# Shared by turn-start.sh, stop-gate.sh and test-lock.sh. Sourced, never run on its own.
+# Callers set: input (the hook's JSON on stdin), and project_dir before using the repo lists.
+
+LOCKED_TESTS_FILE=tiered-workflow-locked-tests
+TESTS_UNLOCKED_FILE=tiered-workflow-tests-unlocked
 
 json_field() { # name -> first string value of that field in the hook input
   printf '%s' "$input" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" | head -n 1
+}
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/}"
+  s="${s//$'\t'/  }"
+  printf '%s' "$s" | LC_ALL=C tr -d '\000-\010\013\014\016-\037'
 }
 
 # The key is matched as plain text, never as a pattern: step names come from the
@@ -42,10 +55,9 @@ repo_state_dir() { # session repo
   printf '%s/%s/%s' "$(state_base)" "${1:-no-session}" "$(printf '%s' "$2" | git hash-object --stdin)"
 }
 
-# Prints the repos to check, one per line: the project, the hook's cwd, and any
-# REPOS that the project's config lists (patterns such as tmp/*/app allowed). A repo
-# whose own config sets REPOS is a host folder and is never checked itself.
-gate_repos() {
+# Prints every repo the turn can reach, once each: the project, the hook's cwd, and any
+# REPOS that the project's config lists (patterns such as tmp/*/app allowed).
+candidate_repos() {
   local dir top rel conf seen=" "
   {
     for dir in "$project_dir" "$(json_field cwd)"; do
@@ -61,6 +73,15 @@ gate_repos() {
   } | while IFS= read -r top; do
     case "$seen" in *" $top "*) continue ;; esac
     seen="$seen$top "
+    printf '%s\n' "$top"
+  done
+}
+
+# The repos to check: candidate repos with a gate config that is on. A repo whose own
+# config sets REPOS is a host folder and is never checked itself.
+gate_repos() {
+  local top conf
+  candidate_repos | while IFS= read -r top; do
     conf="$top/.claude/workflow-gate.conf"
     [ -f "$conf" ] || continue
     [ -n "$(conf_get "$conf" REPOS "")" ] && continue

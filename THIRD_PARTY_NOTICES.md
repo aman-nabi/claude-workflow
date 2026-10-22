@@ -16,7 +16,7 @@ This plugin includes files copied from two open-source projects, pinned at the c
 | `skills/tdd/tests.md` | `skills/engineering/tdd/tests.md` | None |
 | `skills/tdd/mocking.md` | `skills/engineering/tdd/mocking.md` | None |
 | `skills/handoff/SKILL.md` | `skills/productivity/handoff/SKILL.md` | None |
-| `skills/review/SKILL.md` | `skills/engineering/code-review/SKILL.md` | Rewritten around the original's two axes and smell baseline: graded findings, one round, no tracker set-up, read-only reviewers, a hollow-test check. The original is kept at `vendor/mattpocock-skills/code-review-SKILL.md` |
+| `skills/review/SKILL.md` | `skills/engineering/code-review/SKILL.md` | Rewritten around the original's two axes and smell baseline: graded findings, one round, no tracker set-up, one read-only reviewer per repo covering both axes, a hollow-test check, a follow-up list. The original is kept at `vendor/mattpocock-skills/code-review-SKILL.md` |
 
 ## aaddrick, contrarian
 
