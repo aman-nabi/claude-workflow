@@ -1,0 +1,15 @@
+{
+  "name": "aman-nabi",
+  "owner": {
+    "name": "Aman Nabi"
+  },
+  "description": "Aman Nabi's Claude Code plugins.",
+  "plugins": [
+    {
+      "name": "tiered-workflow",
+      "source": "./",
+      "description": "Risk-tiered Claude Code workflow for implementation, automated testing and shipping.",
+      "category": "engineering"
+    }
+  ]
+}

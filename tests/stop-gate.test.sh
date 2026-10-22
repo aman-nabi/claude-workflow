@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# Tests for scripts/turn-start.sh, scripts/stop-gate.sh, scripts/comment-check.sh and
+# scripts/gate-trust.sh. Run: bash tests/stop-gate.test.sh [path-to-bash]
+# Each case builds throwaway git repos in a temp folder, feeds the hooks their JSON
+# input, and checks the gate's stdout.
+set -u
+
+here="$(cd "$(dirname "$0")/.." && pwd)"
+gate="$here/scripts/stop-gate.sh"
+start="$here/scripts/turn-start.sh"
+trust_script="$here/scripts/gate-trust.sh"
+shell="${1:-bash}"
+work="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/stop-gate-test.XXXXXX")" && pwd -P)"
+trap 'rm -rf "$work"' EXIT
+export CLAUDE_PLUGIN_DATA="$work/data"
+export CLAUDE_CONFIG_DIR="$work/config"
+unset CLAUDE_WORKFLOW_GATE
+
+pass=0
+fail=0
+ok() { pass=$((pass + 1)); printf 'ok   %s\n' "$1"; }
+bad() { fail=$((fail + 1)); printf 'FAIL %s\n     %s\n' "$1" "$2"; }
+check() { if eval "$2"; then ok "$1"; else bad "$1" "out=$out"; fi; }
+
+new_repo() { # dir
+  mkdir -p "$1/.claude"
+  git -C "$1" init -q
+  git -C "$1" config user.email test@example.test
+  git -C "$1" config user.name test
+  printf 'clean\n' > "$1/app.ts"
+  # check.sh fails when any file it is given contains BUG, and reports its arguments.
+  cat > "$1/check.sh" <<'SH'
+#!/usr/bin/env bash
+echo "args=$#"
+for f in "$@"; do echo "file=[$f]"; done
+found=0
+for f in "$@"; do [ -f "$f" ] && grep -q BUG "$f" && found=1; done
+if [ "$found" = 1 ]; then echo 'expected "clean" but got \"BUG\" \ end'; printf '\033[31mred text\033[0m\n'; exit 1; fi
+exit 0
+SH
+  chmod +x "$1/check.sh"
+  git -C "$1" add -A
+  git -C "$1" commit -q -m init
+}
+set_conf() { # dir text -> writes, commits and trusts the config
+  printf '%s\n' "$2" > "$1/.claude/workflow-gate.conf"
+  git -C "$1" add -A; git -C "$1" commit -q -m conf
+  bash "$trust_script" "$1" >/dev/null
+}
+hook_input() { printf '{"session_id":"%s","cwd":"%s","hook_event_name":"%s","stop_hook_active":%s}' "$1" "$2" "$3" "$4"; }
+start_turn() { # project session [cwd]
+  hook_input "$2" "${3:-$1}" UserPromptSubmit false | CLAUDE_PROJECT_DIR="$1" "$shell" "$start"
+}
+run_gate() { # project session active [cwd] -> sets out, code
+  out="$(hook_input "$2" "${4:-$1}" Stop "$3" | CLAUDE_PROJECT_DIR="$1" "$shell" "$gate")"
+  code=$?
+}
+valid_json() { printf '%s' "$1" | /usr/bin/env python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; }
+
+# 1. No config: silent.
+r="$work/r1"; new_repo "$r"; start_turn "$r" s1; printf 'BUG\n' > "$r/app.ts"; run_gate "$r" s1 false
+check "no config is silent" '[ "$code" = 0 ] && [ -z "$out" ]'
+
+# 2. No changes in the turn: silent.
+r="$work/r2"; new_repo "$r"; set_conf "$r" 'TEST_CMD=./check.sh {files}'; start_turn "$r" s2; run_gate "$r" s2 false
+check "no changes is silent" '[ "$code" = 0 ] && [ -z "$out" ]'
+
+# 3. A clean change passes, and the same content is not checked twice.
+r="$work/r3"; new_repo "$r"; set_conf "$r" "TEST_CMD=./check.sh {files}; date >> $work/runs3.log"
+start_turn "$r" s3; printf 'clean change\n' > "$r/app.ts"
+run_gate "$r" s3 false; first="$code|$out"; run_gate "$r" s3 false
+runs="$(wc -l < "$work/runs3.log" | tr -d ' ')"
+check "clean change passes once" '[ "$first" = "0|" ] && [ -z "$out" ] && [ "$runs" = 1 ]'
+
+# 4. A failing test blocks with valid JSON naming the step, the output and the turn's files.
+r="$work/r4"; new_repo "$r"; set_conf "$r" 'TEST_CMD=./check.sh {files}'
+start_turn "$r" s4; printf 'BUG one\n' > "$r/app.ts"; run_gate "$r" s4 false
+check "failure blocks with valid JSON" 'case "$out" in *"\"decision\":\"block\""*"TEST failed"*"expected"*"Files changed this turn: app.ts"*) valid_json "$out" ;; *) false ;; esac'
+check "ANSI codes are stripped" 'case "$out" in *$'"'"'\033'"'"'*) false ;; *) true ;; esac'
+
+# 5. Claude stops again without changing anything: no block, but the user is told.
+run_gate "$r" s4 true
+check "unchanged after a block tells the user and does not block" 'case "$out" in *"systemMessage"*"still failing"*) valid_json "$out" ;; *) false ;; esac'
+
+# 6. Attempt cap per user turn; the next prompt resets it.
+r="$work/r6"; new_repo "$r"; set_conf "$r" "$(printf 'TEST_CMD=./check.sh {files}\nMAX_ATTEMPTS=2')"
+start_turn "$r" s6
+printf 'BUG 1\n' > "$r/app.ts"; run_gate "$r" s6 false; a1="$out"
+printf 'BUG 2\n' > "$r/app.ts"; run_gate "$r" s6 true; a2="$out"
+printf 'BUG 3\n' > "$r/app.ts"; run_gate "$r" s6 true; a3="$out"
+start_turn "$r" s6; printf 'BUG 4\n' > "$r/app.ts"; run_gate "$r" s6 false; a4="$out"
+out="$a1|$a2|$a3|$a4"
+check "attempt cap, and a new prompt resets it" 'case "$out" in *"\"decision\":\"block\""*"|"*"\"decision\":\"block\""*"|"*"after 2 attempts"*"|"*"\"decision\":\"block\""*) true ;; *) false ;; esac'
+
+# 7. Paths with spaces are one argument each; untracked files count.
+r="$work/r 7 with space"; new_repo "$r"; set_conf "$r" 'TEST_CMD=./check.sh {files}'
+start_turn "$r" s7; mkdir -p "$r/src dir"; printf 'BUG new\n' > "$r/src dir/new file.ts"; run_gate "$r" s7 false
+check "spaced path is one argument, untracked file counted" 'case "$out" in *"args=1"*"file=[$r/src dir/new file.ts]"*) true ;; *) false ;; esac'
+
+# 8. A timeout kills the whole process group, including children holding the output pipe.
+r="$work/r8"; new_repo "$r"; set_conf "$r" "$(printf 'STEP_TIMEOUT=1\nTEST_CMD=sleep 30 & wait')"
+start_turn "$r" s8; printf 'clean slow\n' > "$r/app.ts"
+t0=$(date +%s); run_gate "$r" s8 false; took=$(( $(date +%s) - t0 ))
+check "timeout kills children too" 'case "$out" in *"timed out after 1s"*) [ "$took" -lt 10 ] ;; *) false ;; esac'
+
+# 9. Only non-matching files changed: {files} steps are skipped, other steps run.
+r="$work/r9"; new_repo "$r"; set_conf "$r" "$(printf 'LINT_CMD=exit 1 {files}\nTYPECHECK_CMD=date >> %s' "$work/tc9.log")"
+start_turn "$r" s9; printf 'notes\n' > "$r/README.md"; run_gate "$r" s9 false
+check "file-scoped step skipped, plain step runs" '[ -z "$out" ] && [ -f "$work/tc9.log" ]'
+
+# 10. A host folder lists its repos; a host that is itself a git repo is not checked.
+p="$work/host"; mkdir -p "$p/.claude"; printf 'REPOS=a b\n' > "$p/.claude/workflow-gate.conf"
+new_repo "$p/a"; new_repo "$p/b"; set_conf "$p/a" 'TEST_CMD=./check.sh {files}'; set_conf "$p/b" 'TEST_CMD=./check.sh {files}'
+start_turn "$p" s10; printf 'BUG in b\n' > "$p/b/app.ts"; run_gate "$p" s10 false
+check "REPOS are checked from a host folder" 'case "$out" in *"TEST failed in $p/b"*) true ;; *) false ;; esac'
+h="$work/hostrepo"; new_repo "$h"; printf 'REPOS=sub\n// previously we did this\n' > "$h/.claude/workflow-gate.conf"
+git -C "$h" add -A; git -C "$h" commit -q -m host
+start_turn "$h" s10b; printf '// previously we did it by hand\n' > "$h/host.ts"; run_gate "$h" s10b false
+check "a host that is a git repo is not checked itself" '[ -z "$out" ]'
+
+# 11. Off switches.
+r="$work/r11"; new_repo "$r"; set_conf "$r" "$(printf 'GATE_ENABLED=0\nTEST_CMD=./check.sh {files}')"
+start_turn "$r" s11; printf 'BUG\n' > "$r/app.ts"; run_gate "$r" s11 false
+check "GATE_ENABLED=0 turns it off" '[ -z "$out" ]'
+r="$work/r11b"; new_repo "$r"; set_conf "$r" 'TEST_CMD=./check.sh {files}'
+start_turn "$r" s11b; printf 'BUG\n' > "$r/app.ts"
+out="$(hook_input s11b "$r" Stop false | CLAUDE_WORKFLOW_GATE=off CLAUDE_PROJECT_DIR="$r" "$shell" "$gate")"
+check "CLAUDE_WORKFLOW_GATE=off turns it off" '[ -z "$out" ]'
+
+# 12. The user's own work in progress is never checked.
+r="$work/r12"; new_repo "$r"; set_conf "$r" 'TEST_CMD=./check.sh {files}'
+printf 'BUG user work\n' > "$r/user.ts"; printf 'BUG edited\n' > "$r/app.ts"
+start_turn "$r" s12; printf 'clean claude\n' > "$r/claude.ts"; run_gate "$r" s12 false
+check "files dirty before the prompt are not checked" '[ -z "$out" ]'
+r="$work/r12b"; new_repo "$r"; set_conf "$r" 'TEST_CMD=./check.sh {files}'
+printf 'BUG\n' > "$r/app.ts"; run_gate "$r" s12b false
+check "with no turn-start record the gate does not guess" '[ -z "$out" ]'
+
+# 13. Commands run only after the user trusts the config, and again after it changes.
+r="$work/r13"; new_repo "$r"; printf 'TEST_CMD=./check.sh {files}\n' > "$r/.claude/workflow-gate.conf"; git -C "$r" add -A; git -C "$r" commit -q -m conf
+start_turn "$r" s13; printf 'BUG\n' > "$r/app.ts"; run_gate "$r" s13 false
+check "untrusted commands are skipped and the user is told" 'case "$out" in *"systemMessage"*"not trusted"*) valid_json "$out" ;; *) false ;; esac'
+bash "$trust_script" "$r" >/dev/null
+start_turn "$r" s13; printf 'BUG again\n' > "$r/app.ts"; run_gate "$r" s13 false
+check "trusted commands run" 'case "$out" in *"\"decision\":\"block\""*) true ;; *) false ;; esac'
+printf 'TEST_CMD=./check.sh {files}\nSTEP_TIMEOUT=60\n' > "$r/.claude/workflow-gate.conf"
+start_turn "$r" s13; printf 'BUG third\n' > "$r/app.ts"; run_gate "$r" s13 false
+check "a changed config needs trusting again" 'case "$out" in *"not trusted"*) true ;; *) false ;; esac'
+
+# 14. The pause marker skips one turn and is removed.
+r="$work/r14"; new_repo "$r"; set_conf "$r" 'TEST_CMD=./check.sh {files}'
+start_turn "$r" s14; printf 'BUG red on purpose\n' > "$r/app.ts"
+touch "$(git -C "$r" rev-parse --absolute-git-dir)/tiered-workflow-pause"; run_gate "$r" s14 false
+check "pause marker skips the turn and tells the user" 'case "$out" in *"systemMessage"*"paused"*) [ ! -f "$(git -C "$r" rev-parse --absolute-git-dir)/tiered-workflow-pause" ] ;; *) false ;; esac'
+start_turn "$r" s14; printf 'BUG next turn\n' > "$r/app.ts"; run_gate "$r" s14 false
+check "the next turn is checked again" 'case "$out" in *"\"decision\":\"block\""*) true ;; *) false ;; esac'
+
+# 15. Config values: a quote inside a command survives, CRLF endings are ignored.
+r="$work/r15"; new_repo "$r"; set_conf "$r" "$(printf 'TEST_CMD=./check.sh {files} "smoke tag"\r\nMAX_ATTEMPTS=1\r')"
+start_turn "$r" s15; printf 'clean\nmore\n' > "$r/app.ts"; run_gate "$r" s15 false
+check "a command ending in a quote still runs" '[ -z "$out" ]'
+printf 'BUG a\n' > "$r/app.ts"; run_gate "$r" s15 true; b1="$out"
+printf 'BUG b\n' > "$r/app.ts"; run_gate "$r" s15 true
+out="$b1|$out"
+check "MAX_ATTEMPTS with a CRLF ending still caps" 'case "$out" in *"\"decision\":\"block\""*"|"*"after 1 attempts"*) true ;; *) false ;; esac'
+
+# Comment check.
+comment_repo() { # dir conf-text
+  new_repo "$1"
+  printf '// The rate limit comes from the provider contract, see ID-12.\n// previously we used a fixed window\nexport const a = 1;\n' > "$1/legacy.ts"
+  set_conf "$1" "$2"
+}
+r="$work/c1"; comment_repo "$r" 'TEST_CMD='; start_turn "$r" c1
+printf '// The rate limit comes from the provider contract, see ID-12.\n// previously we used a fixed window\nexport const a = 1;\n// Updated to use a sliding window as requested\nexport const b = 2;\n' > "$r/legacy.ts"
+run_gate "$r" c1 false
+check "a history comment added this turn is flagged with its line" 'case "$out" in *"COMMENTS failed"*"legacy.ts:4: comment talks about history"*) true ;; *) false ;; esac'
+check "an old comment that was not touched is not flagged" 'case "$out" in *"legacy.ts:2:"*) false ;; *) true ;; esac'
+
+r="$work/c2"; comment_repo "$r" 'TEST_CMD='
+printf '// previously we parsed by hand\nexport const u = 1;\n' > "$r/user.ts"
+start_turn "$r" c2
+printf '// previously we parsed by hand\nexport const u = 1;\nexport const v = 2;\n' > "$r/user.ts"
+run_gate "$r" c2 false
+check "the user's own comment in a file Claude edits is not flagged" '[ -z "$out" ]'
+
+r="$work/c3"; comment_repo "$r" 'TEST_CMD='; start_turn "$r" c3
+printf 'export function f() {\n  // TODO handle the empty case\n  // TODO(ID-37) handle the linked account\n  // FIXME see https://example.test/issue/9\n  return 1;\n}\n' > "$r/todo.ts"
+run_gate "$r" c3 false
+check "TODO needs a ticket; ticket IDs and links pass" 'case "$out" in *"todo.ts:2: TODO without a ticket"*) case "$out" in *"todo.ts:3:"*|*"todo.ts:4:"*) false ;; *) true ;; esac ;; *) false ;; esac'
+
+r="$work/c4"; comment_repo "$r" 'TEST_CMD='; start_turn "$r" c4
+{ printf '/**\n'; for i in 1 2 3 4 5 6 7 8 9; do printf ' * line %s\n' "$i"; done; printf ' */\nexport const c = 3;\n// ==========\n'; } > "$r/block.ts"
+run_gate "$r" c4 false
+check "long blocks and banners are flagged" 'case "$out" in *"block.ts:9: comment block longer than 8 lines"*"block.ts:13: banner or divider"*) true ;; *) false ;; esac'
+
+r="$work/c5"; comment_repo "$r" 'COMMENT_MAX_LINES=0'; start_turn "$r" c5
+{ printf '/**\n'; for i in 1 2 3 4 5 6 7 8 9; do printf ' * line %s\n' "$i"; done; printf ' */\nexport const c = 3;\n'; } > "$r/block.ts"
+run_gate "$r" c5 false
+check "COMMENT_MAX_LINES=0 allows long blocks" '[ -z "$out" ]'
+
+r="$work/c6"; comment_repo "$r" 'TEST_CMD='; start_turn "$r" c6
+printf 'class A {\n  #count = 0;\n  // Retries stop at 3 because the provider bans the account after 5 failures.\n  inc() { return ++this.#count; }\n}\n' > "$r/clean.ts"
+printf '#!/usr/bin/env python3\n# previously we parsed by hand\nx = 1\n' > "$r/tool.py"
+run_gate "$r" c6 false
+check "why-comments and #private fields pass" 'case "$out" in *"clean.ts:"*) false ;; *) true ;; esac'
+check "hash comments are checked in Python, the shebang is not" 'case "$out" in *"tool.py:2: comment talks about history"*) true ;; *) false ;; esac'
+
+r="$work/c7"; comment_repo "$r" 'COMMENT_BANNERS=0'; start_turn "$r" c7
+printf '%s\n' '// ---------------------------------- fixtures' '// A seat holder no longer assigned gets the one 404.' '// Rebuild when the API changed or the UI updated.' '// Restore the previously focused element (WCAG 2.4.3).' '// Pinned to Stripe API version 2024-06-20.' '// Phone mask XXX-XXX-XXXX.' '// Walk fixes 22 Oct 2026: the label is kept.' '// Kept for the audit trail since 3 Mar 2025. comment-check: allow' 'export const e = 5;' > "$r/domain.ts"
+printf 'export const View = () => (\n  <div>\n    {/* Updated as requested */}\n  </div>\n);\n' > "$r/view.tsx"
+run_gate "$r" c7 false
+check "domain words, API dates, masks and allowed banners pass" 'case "$out" in *"domain.ts:1:"*|*"domain.ts:2:"*|*"domain.ts:3:"*|*"domain.ts:4:"*|*"domain.ts:5:"*|*"domain.ts:6:"*|*"domain.ts:8:"*) false ;; *) true ;; esac'
+check "dated change notes are flagged" 'case "$out" in *"domain.ts:7: dated change note"*) true ;; *) false ;; esac'
+check "JSX comments are checked" 'case "$out" in *"view.tsx:3: comment talks about history"*) true ;; *) false ;; esac'
+
+r="$work/c8"; comment_repo "$r" 'COMMENT_CHECK=0'; start_turn "$r" c8
+printf '// previously we used a fixed window\nexport const d = 4;\n' > "$r/off.ts"; run_gate "$r" c8 false
+check "COMMENT_CHECK=0 turns the comment check off" '[ -z "$out" ]'
+
+printf '\n%s passed, %s failed (shell: %s, %s)\n' "$pass" "$fail" "$shell" "$("$shell" -c 'echo $BASH_VERSION')"
+[ "$fail" = 0 ]
